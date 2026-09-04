@@ -63,6 +63,9 @@ export interface AcpSpec {
   authFiles?: string[];
   /** Used until session/new reports what the agent actually serves. */
   models: ModelCatalog;
+  /** When --version would start a session instead of printing a
+   * version, the install probe is "is this binary on PATH". */
+  probePath?: boolean;
 }
 
 export interface AcpConfig {
@@ -73,6 +76,17 @@ export interface AcpConfig {
 }
 
 const PROTOCOL_VERSION = 1;
+
+/** `cli --version` is the usual install probe. This is the fallback for
+ * adapters that treat any extra argv as "start talking ACP". */
+function cliOnPath(cli: string): boolean {
+  if (cli.includes("/") || cli.includes("\\")) return existsSync(cli);
+  const sep = process.platform === "win32" ? ";" : ":";
+  for (const dir of (process.env.PATH ?? "").split(sep)) {
+    if (dir && existsSync(join(dir, cli))) return true;
+  }
+  return false;
+}
 
 /** The connectors bridge ships as TypeScript in development and compiled
  * JavaScript in the packaged app; resolve whichever is actually there. */
@@ -468,11 +482,15 @@ export function acpDriver(spec: AcpSpec): ProviderDriver<AcpConfig> {
       };
 
       const snapshot = async (): Promise<ProviderSnapshot> => {
-        const version = await new Promise<string | null>((resolve) => {
-          execFile(config.cli, ["--version"], { timeout: 8_000 }, (err, stdout) =>
-            resolve(err ? null : stdout.trim().split("\n").pop()!.trim()),
-          );
-        });
+        const version = spec.probePath
+          ? cliOnPath(config.cli)
+            ? config.cli
+            : null
+          : await new Promise<string | null>((resolve) => {
+              execFile(config.cli, ["--version"], { timeout: 8_000 }, (err, stdout) =>
+                resolve(err ? null : stdout.trim().split("\n").pop()!.trim()),
+              );
+            });
         if (!version) return { state: "unavailable", reason: `\`${config.cli}\` CLI not found` };
         const hasKey = (spec.keyEnv ?? []).some((k) => input.environment[k] || process.env[k]);
         const signedIn = (spec.authFiles ?? []).some((f) => existsSync(join(homedir(), f)));
@@ -580,6 +598,24 @@ export const ACP_SPECS: readonly AcpSpec[] = [
         { id: "auto", label: "Auto" },
         { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
       ],
+    },
+  },
+  {
+    kind: "pi",
+    name: "Pi",
+    // pi-acp on PATH, not npx: the probe is `pi-acp --version`, and a
+    // one-shot npx would make every snapshot pay the download
+    command: "pi-acp",
+    args: [],
+    // --version starts the ACP session, so presence on PATH is the probe
+    probePath: true,
+    install: "npm i -g --ignore-scripts @earendil-works/pi-coding-agent && npm i -g pi-acp",
+    signIn: "run `pi` (or `pi-acp --terminal-login`) and configure providers/login",
+    // credentials live in Pi; nothing of ours to pass
+    authFiles: [".pi/agent/auth.json"],
+    models: {
+      default: "auto",
+      options: [{ id: "auto", label: "Auto" }],
     },
   },
 ];
