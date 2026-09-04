@@ -20,7 +20,7 @@
 import { spawn, execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type {
@@ -34,6 +34,7 @@ import type {
   SendTurnInput,
 } from "../contracts.ts";
 import { newEventId, newId } from "../contracts.ts";
+import { resolveCli } from "../path.ts";
 import { appendNative } from "./native.ts";
 import { describeEarlyExit, describeSpawnError } from "./spawn-error.ts";
 
@@ -76,17 +77,6 @@ export interface AcpConfig {
 }
 
 const PROTOCOL_VERSION = 1;
-
-/** `cli --version` is the usual install probe. This is the fallback for
- * adapters that treat any extra argv as "start talking ACP". */
-function cliOnPath(cli: string): boolean {
-  if (cli.includes("/") || cli.includes("\\")) return existsSync(cli);
-  const sep = process.platform === "win32" ? ";" : ":";
-  for (const dir of (process.env.PATH ?? "").split(sep)) {
-    if (dir && existsSync(join(dir, cli))) return true;
-  }
-  return false;
-}
 
 /** The connectors bridge ships as TypeScript in development and compiled
  * JavaScript in the packaged app; resolve whichever is actually there. */
@@ -169,7 +159,7 @@ export function acpDriver(spec: AcpSpec): ProviderDriver<AcpConfig> {
             effort: turn.effort,
           }) ?? []),
         ];
-        const child = spawn(config.cli, argv, {
+        const child = spawn(resolveCli(config.cli) ?? config.cli, argv, {
           cwd: turn.cwd ?? homedir(),
           env: childEnv(turn.env),
           stdio: ["pipe", "pipe", "pipe"],
@@ -482,12 +472,13 @@ export function acpDriver(spec: AcpSpec): ProviderDriver<AcpConfig> {
       };
 
       const snapshot = async (): Promise<ProviderSnapshot> => {
+        const resolved = resolveCli(config.cli);
         const version = spec.probePath
-          ? cliOnPath(config.cli)
-            ? config.cli
+          ? resolved
+            ? basename(resolved)
             : null
           : await new Promise<string | null>((resolve) => {
-              execFile(config.cli, ["--version"], { timeout: 8_000 }, (err, stdout) =>
+              execFile(resolved ?? config.cli, ["--version"], { timeout: 8_000 }, (err, stdout) =>
                 resolve(err ? null : stdout.trim().split("\n").pop()!.trim()),
               );
             });
@@ -603,11 +594,10 @@ export const ACP_SPECS: readonly AcpSpec[] = [
   {
     kind: "pi",
     name: "Pi",
-    // pi-acp on PATH, not npx: the probe is `pi-acp --version`, and a
-    // one-shot npx would make every snapshot pay the download
+    // pi-acp on PATH (or a well-known global bin), not npx: --version
+    // starts an ACP session and hangs, so the probe is resolveCli
     command: "pi-acp",
     args: [],
-    // --version starts the ACP session, so presence on PATH is the probe
     probePath: true,
     install: "npm i -g --ignore-scripts @earendil-works/pi-coding-agent && npm i -g pi-acp",
     signIn: "run `pi` (or `pi-acp --terminal-login`) and configure providers/login",

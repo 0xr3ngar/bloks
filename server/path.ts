@@ -16,10 +16,20 @@ import { existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 
+function nvmBins(home: string): string[] {
+  const root = join(home, ".nvm", "versions", "node");
+  try {
+    return readdirSync(root).map((v) => join(root, v, "bin"));
+  } catch {
+    return [];
+  }
+}
+
 /** Where a `npm i -g`, brew, volta, pnpm or plain installer puts a CLI.
  * Order matters only for ties, so the common ones come first. */
 function candidateDirs(): string[] {
   const home = homedir();
+  const prefix = process.env.npm_config_prefix || process.env.PREFIX;
 
   if (process.platform === "win32") {
     // npm's global prefix and the installers' usual homes. AppData paths
@@ -31,31 +41,55 @@ function candidateDirs(): string[] {
       join(local, "Programs"),
       join(home, ".grok", "bin"),
       join(home, ".local", "bin"),
+      ...(prefix ? [prefix, join(prefix, "bin")] : []),
     ];
   }
 
-  const fixed = [
+  return [
     "/opt/homebrew/bin", // Apple Silicon brew
     "/usr/local/bin", // Intel brew, and half the installers ever written
     join(home, ".local", "bin"),
+    join(home, ".local", "share", "pnpm"),
     join(home, ".grok", "bin"), // the xAI installer’s private prefix
     join(home, ".npm-global", "bin"),
     join(home, "Library", "pnpm"),
     join(home, ".volta", "bin"),
+    join(home, ".fnm", "aliases", "default", "bin"),
+    join(home, ".local", "share", "fnm", "aliases", "default", "bin"),
+    ...(process.env.FNM_MULTISHELL_PATH ? [process.env.FNM_MULTISHELL_PATH] : []),
     join(home, "bin"),
+    ...(prefix ? [join(prefix, "bin")] : []),
+    ...nvmBins(home),
   ];
+}
 
-  // nvm keeps one bin directory per installed node; take the newest,
-  // which is where a recent `npm i -g` will have landed.
-  const nvmVersions = join(home, ".nvm", "versions", "node");
-  try {
-    const newest = readdirSync(nvmVersions).sort().at(-1);
-    if (newest) fixed.push(join(nvmVersions, newest, "bin"));
-  } catch {
-    /* no nvm */
+function namesFor(cli: string): string[] {
+  if (process.platform === "win32" && !/\.[A-Za-z0-9]+$/.test(cli)) {
+    const exts = (process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";");
+    return [cli, ...exts.map((ext) => cli + ext)];
   }
+  return [cli];
+}
 
-  return fixed;
+/**
+ * Locate a CLI the same way widenPath would, without requiring PATH to
+ * already include the directory. PATH still wins when it has a hit.
+ */
+export function resolveCli(cli: string): string | null {
+  if (!cli) return null;
+  if (cli.includes("/") || cli.includes("\\")) return existsSync(cli) ? cli : null;
+
+  const seen = new Set<string>();
+  const dirs = [...(process.env.PATH ?? "").split(delimiter), ...candidateDirs()];
+  for (const dir of dirs) {
+    if (!dir || seen.has(dir)) continue;
+    seen.add(dir);
+    for (const name of namesFor(cli)) {
+      const full = join(dir, name);
+      if (existsSync(full)) return full;
+    }
+  }
+  return null;
 }
 
 /**
